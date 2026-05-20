@@ -33,9 +33,9 @@ from PySide6.QtGui import QImage, QPixmap
 import matplotlib.pyplot as plt
 
 # ================== 串口配置 ==================
-SERIAL_PORT = "COM4"        # 默认串口号，可在界面中切换
+SERIAL_PORT = "COM7"        # 默认串口号，可在界面中切换
 BAUDRATE = 115200
-DEFAULT_CAMERA_INDEX = 1
+DEFAULT_CAMERA_INDEX = 0
 
 # ================== PID 参数 ==================
 Kp = 8   # 比例增益（可调）

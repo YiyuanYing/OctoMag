@@ -40,9 +40,9 @@ import matplotlib
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 黑体
 matplotlib.rcParams['axes.unicode_minus'] = False    # 解决负号显示问题
 # 串口参数
-SERIAL_PORT = "COM4"
+SERIAL_PORT = "COM7"
 BAUDRATE = 115200
-DEFAULT_CAMERA_INDEX = 1
+DEFAULT_CAMERA_INDEX = 0
 
 class OverlayLabel(QLabel):
     """自定义标签，用于接收鼠标事件并转发给主窗口"""
