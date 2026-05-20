@@ -5,15 +5,15 @@
 - 通过 OpenCV 摄像头画面检测小磁体中心位置。
 - 使用 PySide6 提供实时显示、选择起点、绘制路径、停止和磁铁模式切换。
 - 使用 PID 控制把路径跟踪误差转换为 6 路电磁铁电流命令。
-- 通过串口 COM4、115200 波特率向下位机发送 a0-a5 六通道电流。
+- 在界面中选择串口和摄像头索引。
+- 通过所选串口、115200 波特率向下位机发送 a0-a5 六通道电流。
 
 运行环境：
 - 建议使用 conda 环境 grad_mag，Python 3.13。
 - 需要 pip 包：opencv-python、numpy、pyserial、PySide6、matplotlib。
 
 注意事项：
-- 默认摄像头索引为 1，如设备不同请修改 cv2.VideoCapture(1)。
-- 默认串口为 COM4，如下位机端口不同请修改 SERIAL_PORT。
+- 默认摄像头索引为 1，默认串口为 COM4，可在界面中切换。
 - 该版本主要用于实时控制和调试，误差曲线函数不会自动保存实验数据。
 """
 
@@ -21,10 +21,11 @@ import sys
 import cv2
 import numpy as np
 import serial
+from serial.tools import list_ports
 import time
 import math
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QLabel,
+    QApplication, QComboBox, QMainWindow, QPushButton, QLabel, QSpinBox,
     QVBoxLayout, QHBoxLayout, QWidget
 )
 from PySide6.QtCore import QTimer, Qt
@@ -32,14 +33,9 @@ from PySide6.QtGui import QImage, QPixmap
 import matplotlib.pyplot as plt
 
 # ================== 串口配置 ==================
-SERIAL_PORT = "COM4"        # 串口号，可根据实际调整
+SERIAL_PORT = "COM4"        # 默认串口号，可在界面中切换
 BAUDRATE = 115200
-
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.1)
-except:
-    ser = None
-    print("⚠ 串口未连接，仅在终端打印电流命令")
+DEFAULT_CAMERA_INDEX = 1
 
 # ================== PID 参数 ==================
 Kp = 8   # 比例增益（可调）
@@ -56,10 +52,20 @@ class MagneticControl(QMainWindow):
         self.setWindowTitle("6极电磁铁磁体控制 - 工业级方案")
         self.resize(1000, 800)
 
-        # 摄像头
-        self.cap = cv2.VideoCapture(1)  # 摄像头索引，默认1
+        self.cap = None
+        self.ser = None
+
         # 界面组件
         self.image_label = QLabel()
+        self.combo_serial = QComboBox()
+        self.combo_serial.setEditable(True)
+        self.btn_refresh_ports = QPushButton("刷新串口")
+        self.btn_connect_serial = QPushButton("连接串口")
+        self.spin_camera = QSpinBox()
+        self.spin_camera.setRange(0, 20)
+        self.spin_camera.setValue(DEFAULT_CAMERA_INDEX)
+        self.btn_open_camera = QPushButton("打开相机")
+        self.lbl_device_status = QLabel("串口: 未连接 | 相机: 未打开")
         self.btn_start = QPushButton("选择起点")
         self.btn_draw = QPushButton("绘制路径")
         self.btn_stop = QPushButton("停止")
@@ -71,8 +77,21 @@ class MagneticControl(QMainWindow):
         self.btn_draw.clicked.connect(self.enable_path_drawing)
         self.btn_stop.clicked.connect(self.stop_motion)
         self.btn_mode.clicked.connect(self.toggle_mode)
+        self.btn_refresh_ports.clicked.connect(self.refresh_serial_ports)
+        self.btn_connect_serial.clicked.connect(self.connect_serial)
+        self.btn_open_camera.clicked.connect(self.open_camera)
 
         # 布局设置
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(QLabel("串口"))
+        device_layout.addWidget(self.combo_serial)
+        device_layout.addWidget(self.btn_refresh_ports)
+        device_layout.addWidget(self.btn_connect_serial)
+        device_layout.addWidget(QLabel("相机索引"))
+        device_layout.addWidget(self.spin_camera)
+        device_layout.addWidget(self.btn_open_camera)
+        device_layout.addWidget(self.lbl_device_status)
+
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.btn_start)
         btn_layout.addWidget(self.btn_draw)
@@ -82,6 +101,7 @@ class MagneticControl(QMainWindow):
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.image_label)
+        main_layout.addLayout(device_layout)
         main_layout.addLayout(btn_layout)
 
         container = QWidget()
@@ -117,10 +137,95 @@ class MagneticControl(QMainWindow):
         # 定时器：控制循环约30ms刷新
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
+        self.refresh_serial_ports()
+        self.connect_serial()
+        self.open_camera()
         self.timer.start(30)
+
+    # ================== 设备选择与连接 ==================
+    def refresh_serial_ports(self):
+        current = self.combo_serial.currentText().strip() or SERIAL_PORT
+        self.combo_serial.clear()
+        ports = []
+        try:
+            ports = [port.device for port in list_ports.comports()]
+        except Exception as exc:
+            print(f"刷新串口失败: {exc}")
+
+        if current and current not in ports:
+            ports.insert(0, current)
+        elif not ports:
+            ports.append(SERIAL_PORT)
+
+        self.combo_serial.addItems(ports)
+        index = self.combo_serial.findText(current)
+        if index >= 0:
+            self.combo_serial.setCurrentIndex(index)
+        self.update_device_status()
+
+    def connect_serial(self):
+        port = self.combo_serial.currentText().strip()
+        if not port:
+            self.ser = None
+            self.update_device_status()
+            print("未选择串口，仅在终端打印电流命令")
+            return
+
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+
+        try:
+            self.ser = serial.Serial(port, BAUDRATE, timeout=0.1)
+            self.btn_connect_serial.setText("重连串口")
+            print(f"串口已连接: {port}")
+        except serial.SerialException as exc:
+            self.ser = None
+            print(f"⚠ 串口 {port} 连接失败，仅在终端打印电流命令: {exc}")
+        self.update_device_status()
+
+    def open_camera(self):
+        camera_index = self.spin_camera.value()
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+
+        self.cap = cv2.VideoCapture(camera_index)
+        if not self.cap.isOpened():
+            self.cap.release()
+            self.cap = None
+            self.magnet_center = None
+            print(f"⚠ 相机索引 {camera_index} 打开失败")
+        else:
+            self.reset_tracking_state()
+            print(f"相机已打开: index={camera_index}")
+        self.update_device_status()
+
+    def update_device_status(self):
+        serial_state = "串口: 未连接"
+        if self.ser and self.ser.is_open:
+            serial_state = f"串口: {self.ser.port}"
+
+        camera_state = "相机: 未打开"
+        if self.cap and self.cap.isOpened():
+            camera_state = f"相机: {self.spin_camera.value()}"
+
+        self.lbl_device_status.setText(f"{serial_state} | {camera_state}")
+
+    def reset_tracking_state(self):
+        self.start_point = None
+        self.magnet_center = None
+        self.traj_line = []
+        self.full_path = []
+        self.current_target_index = 0
+        self.integral_x = 0.0
+        self.integral_y = 0.0
+        self.last_time = time.time()
+        self.last_x = 0.0
+        self.last_y = 0.0
 
     # ================== 图像与控制更新 ==================
     def update_frame(self):
+        if not self.cap or not self.cap.isOpened():
+            return
         ret, frame = self.cap.read()
         if not ret:
             return
@@ -365,8 +470,21 @@ class MagneticControl(QMainWindow):
             f"a4:{currents[4]:02d},a5:{currents[5]:02d}\r\n"
         )
         print(cmd.strip())
-        if ser:
-            ser.write(cmd.encode())
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.write(cmd.encode())
+            except serial.SerialException as exc:
+                print(f"串口发送失败: {exc}")
+                self.ser = None
+                self.update_device_status()
+
+    def closeEvent(self, event):
+        self.send_currents([0] * 6)
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        event.accept()
 
     # ================== 误差绘图 ==================
     def generate_error_plot(self):
