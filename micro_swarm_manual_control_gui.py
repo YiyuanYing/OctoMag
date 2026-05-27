@@ -32,8 +32,9 @@ class MicroClusterManualControlGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("梯度线圈仪控制-微纳集群")
 
-        # 六路线圈的空间方向，后续可按实际接线顺序修改。
-        self.coil_angles_deg = [0, 60, 120, 180, 240, 300]
+        # Top-view geometry: a0-a5 map to physical coils 1-6.
+        # Physical order clockwise from +Y is 6, 5, 4, 3, 2, 1.
+        self.coil_angles_deg = [150, 210, 270, 330, 30, 90]
         self.coil_dirs = [
             (math.cos(math.radians(theta)), math.sin(math.radians(theta)))
             for theta in self.coil_angles_deg

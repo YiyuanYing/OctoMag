@@ -44,6 +44,14 @@ SERIAL_PORT = "COM7"
 BAUDRATE = 115200
 DEFAULT_CAMERA_INDEX = 0
 
+# Top-view geometry: a0-a5 map to physical coils 1-6.
+# Physical order clockwise from +Y is 6, 5, 4, 3, 2, 1.
+COIL_ANGLES_DEG = [150, 210, 270, 330, 30, 90]
+COIL_DIRS = [
+    (math.cos(math.radians(theta)), math.sin(math.radians(theta)))
+    for theta in COIL_ANGLES_DEG
+]
+
 class OverlayLabel(QLabel):
     """自定义标签，用于接收鼠标事件并转发给主窗口"""
     def __init__(self, parent=None):
@@ -449,18 +457,8 @@ class MagneticControl(QMainWindow):
             else:
                 self.current_target_index += 1
 
-        # 计算各电磁铁方向投影（1-3号为例，6号模式时再加后三个方向）
-        directions = [
-            (-math.sqrt(2)/2,  math.sqrt(2)/2),  # a0
-            (0, -1),                             # a1
-            (math.sqrt(3)/2, 0.5)                # a2
-        ]
-        if not self.use_123_only:
-            directions.extend([
-                (math.sqrt(2)/2, -math.sqrt(2)/2),  # a3
-                (0, 1),                             # a4
-                (-math.sqrt(3)/2, -0.5)             # a5
-            ])
+        # 计算各电磁铁方向投影。1-3 模式只使用 a0-a2；1-6 模式使用全部通道。
+        directions = COIL_DIRS[:3] if self.use_123_only else COIL_DIRS
 
         # 计算投影贡献
         contributions = [ux*dx + uy*dy for (dx, dy) in directions]

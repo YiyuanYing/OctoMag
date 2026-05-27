@@ -37,6 +37,14 @@ SERIAL_PORT = "COM7"        # 默认串口号，可在界面中切换
 BAUDRATE = 115200
 DEFAULT_CAMERA_INDEX = 0
 
+# Top-view geometry: a0-a5 map to physical coils 1-6.
+# Physical order clockwise from +Y is 6, 5, 4, 3, 2, 1.
+COIL_ANGLES_DEG = [150, 210, 270, 330, 30, 90]
+COIL_DIRS = [
+    (math.cos(math.radians(theta)), math.sin(math.radians(theta)))
+    for theta in COIL_ANGLES_DEG
+]
+
 # ================== PID 参数 ==================
 Kp = 8   # 比例增益（可调）
 Ki = 0.02  # 积分增益（较小，防止积分风up）
@@ -408,19 +416,8 @@ class MagneticControl(QMainWindow):
             self.current_target_index += 1
             return
 
-        # 磁铁单位方向（1-6号）
-        all_dirs = [
-            (-math.sqrt(2)/2,  math.sqrt(2)/2),  # a0
-            (0, -1),                              # a1
-            (math.sqrt(3)/2,  0.5),               # a2
-            (math.sqrt(2)/2, -math.sqrt(2)/2),    # a3
-            (0, 1),                               # a4
-            (-math.sqrt(3)/2, -0.5)               # a5
-        ]
-        if self.use_123_only:
-            dirs = all_dirs[:3]
-        else:
-            dirs = all_dirs
+        # 磁铁单位方向（a0-a5 对应实物 1-6 号）
+        dirs = COIL_DIRS[:3] if self.use_123_only else COIL_DIRS
 
         # 计算各磁铁贡献量（可以为负，但后续只用正值）
         contributions = []
