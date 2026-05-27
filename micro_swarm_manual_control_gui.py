@@ -39,6 +39,12 @@ class MicroClusterManualControlGUI(QMainWindow):
             (math.cos(math.radians(theta)), math.sin(math.radians(theta)))
             for theta in self.coil_angles_deg
         ]
+        # Motion modes only use the upper layer: physical coils 1, 3, 5 -> a0, a2, a4.
+        self.active_motion_coils = [0, 2, 4]
+        # The lower controller appears to route command slots in interleaved coil order:
+        # command a1 drives logical/physical a2, command a2 drives logical/physical a4.
+        # Keep all GUI/control math in logical a0-a5 order, and remap only at send time.
+        self.command_channel_to_logical_coil = [0, 2, 4, 1, 3, 5]
 
         # 串口与摄像头资源。
         self.ser = None
@@ -253,7 +259,8 @@ class MicroClusterManualControlGUI(QMainWindow):
 
         self.bias_current_spin = QSpinBox()
         self.bias_current_spin.setRange(0, 999)
-        self.bias_current_spin.setValue(45)
+        self.bias_current_spin.setValue(0)
+        self.bias_current_spin.setEnabled(False)
 
         self.max_current_spin = QSpinBox()
         self.max_current_spin.setRange(0, 999)
@@ -647,7 +654,8 @@ class MicroClusterManualControlGUI(QMainWindow):
         self.motion_start_time = time.time()
         self.idle_zero_sent = False
         self.ramp_stop_start_time = None
-        self.log(f"点动开始：a{coil_index}")
+        command_index = self.command_channel_to_logical_coil.index(coil_index)
+        self.log(f"点动开始：逻辑 a{coil_index} -> 发送 a{command_index}")
         self.update_mode_display()
 
     def stop_pulse(self):
@@ -732,58 +740,66 @@ class MicroClusterManualControlGUI(QMainWindow):
             self.log(f"控制循环异常：{exc}")
 
     def generate_translation_currents(self):
-        """根据目标方向选择点积最大的单个线圈通电。"""
+        """根据目标方向用 a0/a2/a4 合成平动电流。"""
         phi = math.radians(self.translation_angle_deg)
-        ux = math.cos(phi)
-        uy = math.sin(phi)
-
-        contributions = [
-            ux * dx + uy * dy
-            for dx, dy in self.coil_dirs
-        ]
-        max_idx = max(range(len(contributions)), key=lambda i: contributions[i])
-
         current_value = min(self.translation_current_spin.value(), self.max_current_spin.value())
-        currents = [0, 0, 0, 0, 0, 0]
-        currents[max_idx] = current_value
-        return currents
+        return self.compose_active_motion_currents(phi, current_value)
 
     def generate_rotation_currents(self):
-        """生成六相正弦旋转电流。"""
+        """用 a0/a2/a4 合成旋转平面方向。"""
         t = time.time() - self.motion_start_time
         omega = 2.0 * math.pi * self.frequency_spin.value()
         phase = -omega * t if self.rotate_direction == "CW" else omega * t
 
-        bias = self.bias_current_spin.value()
         amplitude = self.rotation_amplitude_spin.value()
-
-        currents = []
-        for theta_deg in self.coil_angles_deg:
-            theta = math.radians(theta_deg)
-            value = bias + amplitude * math.cos(phase - theta)
-            currents.append(value)
-        return self.clamp_currents(currents)
+        return self.compose_active_motion_currents(phase, amplitude)
 
     def generate_rotate_translate_currents(self):
-        """生成旋转电流叠加平动偏置。"""
+        """用 a0/a2/a4 合成旋转叠加平动的平面方向。"""
         t = time.time() - self.motion_start_time
         omega = 2.0 * math.pi * self.frequency_spin.value()
         phase = -omega * t if self.rotate_direction == "CW" else omega * t
 
-        bias = self.bias_current_spin.value()
         rot_amp = self.rotation_amplitude_spin.value()
         move_amp = self.move_overlay_spin.value()
         phi = math.radians(self.rotate_translate_angle_deg)
 
-        currents = []
-        for theta_deg in self.coil_angles_deg:
-            theta = math.radians(theta_deg)
-            value = (
-                bias
-                + rot_amp * math.cos(phase - theta)
-                + move_amp * math.cos(phi - theta)
-            )
-            currents.append(value)
+        vector_x = rot_amp * math.cos(phase) + move_amp * math.cos(phi)
+        vector_y = rot_amp * math.sin(phase) + move_amp * math.sin(phi)
+        vector_amp = math.hypot(vector_x, vector_y)
+        if vector_amp <= 1e-9:
+            return [0, 0, 0, 0, 0, 0]
+
+        current_value = min(vector_amp, self.max_current_spin.value())
+        return self.compose_active_motion_currents(math.atan2(vector_y, vector_x), current_value)
+
+    def compose_active_motion_currents(self, angle_rad, peak_current):
+        """Use a0/a2/a4 to synthesize one planar direction."""
+        self.update_safety_limits()
+        peak_current = max(0, min(self.max_current, int(round(peak_current))))
+        currents = [0, 0, 0, 0, 0, 0]
+        if peak_current <= 0:
+            return currents
+
+        ux = math.cos(angle_rad)
+        uy = math.sin(angle_rad)
+        projections = [
+            ux * self.coil_dirs[index][0] + uy * self.coil_dirs[index][1]
+            for index in self.active_motion_coils
+        ]
+
+        # The three active coil directions are 120 degrees apart. Adding the same
+        # offset to all three does not change the planar vector, so use the
+        # smallest non-negative offset and scale the largest channel to peak_current.
+        min_projection = min(projections)
+        weights = [projection - min_projection for projection in projections]
+        max_weight = max(weights)
+        if max_weight <= 1e-9:
+            return currents
+
+        for index, weight in zip(self.active_motion_coils, weights):
+            currents[index] = peak_current * weight / max_weight
+
         return self.clamp_currents(currents)
 
     def generate_pulse_currents(self):
@@ -862,9 +878,13 @@ class MicroClusterManualControlGUI(QMainWindow):
     def send_currents(self, currents):
         """按旧协议通过串口发送 6 通道电流值命令。"""
         try:
-            safe_currents = [
+            logical_currents = [
                 max(0, min(self.max_current_spin.value(), int(round(value))))
                 for value in currents
+            ]
+            safe_currents = [
+                logical_currents[logical_index]
+                for logical_index in self.command_channel_to_logical_coil
             ]
             cmd = (
                 f"a0:{safe_currents[0]:02d},"
@@ -890,7 +910,10 @@ class MicroClusterManualControlGUI(QMainWindow):
             if hasattr(self, "verbose_command_log_checkbox") and self.verbose_command_log_checkbox.isChecked():
                 now = time.time()
                 if now - self.last_command_log_time > 0.5:
-                    self.log(f"发送：{cmd.strip()}")
+                    logical_text = ",".join(
+                        f"a{i}:{value:02d}" for i, value in enumerate(logical_currents)
+                    )
+                    self.log(f"逻辑输出：{logical_text} | 发送：{cmd.strip()}")
                     self.last_command_log_time = now
         except Exception as exc:
             self.log(f"生成串口命令失败：{exc}")
