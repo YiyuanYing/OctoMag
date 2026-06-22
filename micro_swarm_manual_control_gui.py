@@ -3,10 +3,11 @@ import time
 import math
 
 import cv2
+import numpy as np
 import serial
 import serial.tools.list_ports
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -509,7 +510,7 @@ class MicroClusterManualControlGUI(QMainWindow):
 
             self.latest_frame = frame.copy()
             if self.recording and self.video_writer:
-                self.video_writer.write(frame)
+                self.video_writer.write(self.draw_recording_motion_overlay(frame))
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
@@ -955,6 +956,80 @@ class MicroClusterManualControlGUI(QMainWindow):
             270: "后退",
         }
         return names.get(int(angle_deg), f"{angle_deg}°")
+
+    def angle_to_recording_name(self, angle_deg):
+        """将方向角转换为录像叠字中的平动方向。"""
+        names = {
+            0: "向右",
+            90: "向前",
+            180: "向左",
+            270: "向后",
+        }
+        return names.get(int(angle_deg), f"{angle_deg}°方向")
+
+    def get_recording_motion_text(self):
+        """生成写入录像画面的当前运动模式文字。"""
+        if self.motion_mode == "translate":
+            return f"{self.angle_to_recording_name(self.translation_angle_deg)}平动"
+        if self.motion_mode == "rotate":
+            rotate_text = "顺时针" if self.rotate_direction == "CW" else "逆时针"
+            return f"{rotate_text}旋转"
+        if self.motion_mode == "rotate_translate":
+            rotate_text = "顺时针" if self.rotate_direction == "CW" else "逆时针"
+            translate_text = self.angle_to_recording_name(self.rotate_translate_angle_deg)
+            return f"{rotate_text}旋转 + {translate_text}平动"
+        if self.motion_mode == "pulse":
+            return f"a{self.pulse_coil_index} 点动"
+        if self.motion_mode == "ramp_stop":
+            return "缓停止"
+        return "停止"
+
+    def draw_recording_motion_overlay(self, frame):
+        """在录像帧右下角绘制当前运动模式。"""
+        text = self.get_recording_motion_text()
+        if not text:
+            return frame
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width = rgb.shape[:2]
+        qimg = QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+
+        painter = QPainter(qimg)
+        try:
+            base_size = max(18, min(width, height) // 24)
+            margin = max(12, min(width, height) // 40)
+            padding_x = max(12, base_size // 2)
+            padding_y = max(8, base_size // 3)
+            max_text_width = width - 2 * (margin + padding_x)
+
+            font = QFont("Microsoft YaHei")
+            font.setBold(True)
+            font.setPixelSize(base_size)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+
+            while metrics.horizontalAdvance(text) > max_text_width and font.pixelSize() > 12:
+                font.setPixelSize(font.pixelSize() - 1)
+                painter.setFont(font)
+                metrics = painter.fontMetrics()
+
+            text_width = metrics.horizontalAdvance(text)
+            text_height = metrics.height()
+            rect_width = text_width + 2 * padding_x
+            rect_height = text_height + 2 * padding_y
+            x = width - rect_width - margin
+            y = height - rect_height - margin
+
+            painter.fillRect(x, y, rect_width, rect_height, QColor(0, 0, 0, 150))
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(x + padding_x, y + padding_y + metrics.ascent(), text)
+        finally:
+            painter.end()
+
+        bytes_per_line = qimg.bytesPerLine()
+        buffer = np.frombuffer(qimg.bits(), dtype=np.uint8).reshape((height, bytes_per_line))
+        rgb_overlay = buffer[:, : width * 3].reshape((height, width, 3)).copy()
+        return cv2.cvtColor(rgb_overlay, cv2.COLOR_RGB2BGR)
 
     def update_mode_display(self, *args):
         """更新实时监控区中的模式、方向、频率、录像和平滑状态。"""
