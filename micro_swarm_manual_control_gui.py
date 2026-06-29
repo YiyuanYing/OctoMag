@@ -40,12 +40,13 @@ class MicroClusterManualControlGUI(QMainWindow):
             (math.cos(math.radians(theta)), math.sin(math.radians(theta)))
             for theta in self.coil_angles_deg
         ]
-        # Motion modes only use the upper layer: physical coils 1, 3, 5 -> a0, a2, a4.
-        self.active_motion_coils = [0, 2, 4]
-        # The lower controller appears to route command slots in interleaved coil order:
-        # command a1 drives logical/physical a2, command a2 drives logical/physical a4.
-        # Keep all GUI/control math in logical a0-a5 order, and remap only at send time.
-        self.command_channel_to_logical_coil = [0, 2, 4, 1, 3, 5]
+        # Keep command channel order aligned with magnetic_path_control_*.py:
+        # logical a0-a5 are sent directly as serial a0-a5.
+        self.command_channel_to_logical_coil = [0, 1, 2, 3, 4, 5]
+        # Standalone translation keeps the original upper-layer three-coil behavior.
+        self.translation_motion_coils = [0, 2, 4]
+        # Rotation uses all six coils to synthesize the rotating planar field.
+        self.rotation_motion_coils = [0, 1, 2, 3, 4, 5]
 
         # 串口与摄像头资源。
         self.ser = None
@@ -260,8 +261,8 @@ class MicroClusterManualControlGUI(QMainWindow):
 
         self.bias_current_spin = QSpinBox()
         self.bias_current_spin.setRange(0, 999)
-        self.bias_current_spin.setValue(0)
-        self.bias_current_spin.setEnabled(False)
+        self.bias_current_spin.setValue(5)
+        self.bias_current_spin.valueChanged.connect(self.update_safety_limits)
 
         self.max_current_spin = QSpinBox()
         self.max_current_spin.setRange(0, 999)
@@ -744,19 +745,28 @@ class MicroClusterManualControlGUI(QMainWindow):
         """根据目标方向用 a0/a2/a4 合成平动电流。"""
         phi = math.radians(self.translation_angle_deg)
         current_value = min(self.translation_current_spin.value(), self.max_current_spin.value())
-        return self.compose_active_motion_currents(phi, current_value)
+        return self.compose_planar_field_currents(
+            phi,
+            current_value,
+            self.translation_motion_coils,
+        )
 
     def generate_rotation_currents(self):
-        """用 a0/a2/a4 合成旋转平面方向。"""
+        """用 a0-a5 合成旋转平面方向。"""
         t = time.time() - self.motion_start_time
         omega = 2.0 * math.pi * self.frequency_spin.value()
         phase = -omega * t if self.rotate_direction == "CW" else omega * t
 
         amplitude = self.rotation_amplitude_spin.value()
-        return self.compose_active_motion_currents(phase, amplitude)
+        return self.compose_planar_field_currents(
+            phase,
+            amplitude,
+            self.rotation_motion_coils,
+            self.bias_current_spin.value(),
+        )
 
     def generate_rotate_translate_currents(self):
-        """用 a0/a2/a4 合成旋转叠加平动的平面方向。"""
+        """用 a0-a5 合成旋转叠加平动的平面方向。"""
         t = time.time() - self.motion_start_time
         omega = 2.0 * math.pi * self.frequency_spin.value()
         phase = -omega * t if self.rotate_direction == "CW" else omega * t
@@ -772,12 +782,32 @@ class MicroClusterManualControlGUI(QMainWindow):
             return [0, 0, 0, 0, 0, 0]
 
         current_value = min(vector_amp, self.max_current_spin.value())
-        return self.compose_active_motion_currents(math.atan2(vector_y, vector_x), current_value)
+        return self.compose_planar_field_currents(
+            math.atan2(vector_y, vector_x),
+            current_value,
+            self.rotation_motion_coils,
+            self.bias_current_spin.value(),
+        )
 
     def compose_active_motion_currents(self, angle_rad, peak_current):
         """Use a0/a2/a4 to synthesize one planar direction."""
+        return self.compose_planar_field_currents(
+            angle_rad,
+            peak_current,
+            self.translation_motion_coils,
+        )
+
+    def compose_planar_field_currents(
+        self,
+        angle_rad,
+        peak_current,
+        coil_indices,
+        bias_current=0,
+    ):
+        """Synthesize one planar field direction with selected coils."""
         self.update_safety_limits()
-        peak_current = max(0, min(self.max_current, int(round(peak_current))))
+        bias_current = max(0, min(self.max_current, int(round(bias_current))))
+        peak_current = max(0, min(self.max_current - bias_current, int(round(peak_current))))
         currents = [0, 0, 0, 0, 0, 0]
         if peak_current <= 0:
             return currents
@@ -786,20 +816,20 @@ class MicroClusterManualControlGUI(QMainWindow):
         uy = math.sin(angle_rad)
         projections = [
             ux * self.coil_dirs[index][0] + uy * self.coil_dirs[index][1]
-            for index in self.active_motion_coils
+            for index in coil_indices
         ]
 
-        # The three active coil directions are 120 degrees apart. Adding the same
-        # offset to all three does not change the planar vector, so use the
-        # smallest non-negative offset and scale the largest channel to peak_current.
+        # Adding the same offset to an evenly spaced coil set does not change the
+        # planar vector, so use the smallest non-negative offset and scale the
+        # largest channel to peak_current.
         min_projection = min(projections)
         weights = [projection - min_projection for projection in projections]
         max_weight = max(weights)
         if max_weight <= 1e-9:
             return currents
 
-        for index, weight in zip(self.active_motion_coils, weights):
-            currents[index] = peak_current * weight / max_weight
+        for index, weight in zip(coil_indices, weights):
+            currents[index] = bias_current + peak_current * weight / max_weight
 
         return self.clamp_currents(currents)
 
